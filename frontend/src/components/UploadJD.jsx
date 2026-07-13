@@ -62,7 +62,8 @@ export default function UploadJD({ onJobCreated }) {
         )}
 
         <button type="submit" disabled={loading || (mode === 'text' ? !text : !file)}>
-          {loading ? 'Extracting...' : 'Process Job Description'}
+          {loading && <span className="spinner" />}
+          {loading ? 'Extracting requirements…' : 'Process Job Description'}
         </button>
       </form>
       {error && <p className="error">{error}</p>}

@@ -14,6 +14,7 @@ export default function UploadResumes({ onResumesUploaded }) {
     try {
       const data = await uploadResumesBatch(files)
       onResumesUploaded(data)
+      setFiles([])
     } catch (err) {
       setError(err?.response?.data?.detail || 'Failed to process resumes.')
     } finally {
@@ -31,9 +32,12 @@ export default function UploadResumes({ onResumesUploaded }) {
           multiple
           onChange={(e) => setFiles(Array.from(e.target.files))}
         />
-        {files.length > 0 && <p className="hint">{files.length} file(s) selected</p>}
+        {files.length > 0 && (
+          <p className="hint">{files.length} file{files.length > 1 ? 's' : ''} selected</p>
+        )}
         <button type="submit" disabled={loading || !files.length}>
-          {loading ? 'Extracting...' : 'Upload & Extract Resumes'}
+          {loading && <span className="spinner" />}
+          {loading ? `Extracting ${files.length} resume${files.length > 1 ? 's' : ''}…` : 'Upload & Extract Resumes'}
         </button>
       </form>
       {error && <p className="error">{error}</p>}

@@ -1,8 +1,10 @@
 import json
 import re
+from datetime import datetime
 import requests
+from dateutil import parser as date_parser
 from fastapi import HTTPException
-from app.config import OLLAMA_HOST, OLLAMA_MODEL
+from app.config import OLLAMA_HOST, OLLAMA_EXTRACTION_MODEL, OLLAMA_SCORING_MODEL
 
 RESUME_EXTRACTION_PROMPT = """You are a resume parsing engine. Extract structured information from the resume text below.
 
@@ -12,7 +14,12 @@ Return ONLY a valid JSON object (no markdown fences, no commentary) with exactly
   "email": string or null,
   "phone": string or null,
   "skills": [list of technical/soft skills mentioned, deduplicated, as short strings],
-  "total_experience_years": number (estimate total professional experience in years, 0 if fresher/student),
+  "experience_entries": [list of PAID internships/jobs only — do NOT include student clubs,
+    volunteer roles, or education — each as {{"role": string, "start_date": "Mon YYYY" format
+    e.g. 'Dec 2025', "end_date": "Mon YYYY" format or 'Present' if ongoing}}],
+  "total_experience_years": number (your best estimate as a fallback; this will be
+    recalculated from experience_entries dates when possible, so accuracy here matters
+    less than getting experience_entries right),
   "job_titles": [list of past job titles / internship roles held],
   "education": [{{"degree": string, "institution": string, "year": string}}]
 }}
@@ -65,6 +72,7 @@ Candidate profile:
 Already-confirmed facts (do not contradict these):
 - Skills the candidate HAS that the job wants: {matched_skills}
 - Skills the job wants that the candidate is MISSING: {missing_skills}
+- Experience requirement: {experience_status} (candidate has {candidate_experience} years, job requires {min_experience} years)
 
 Based on all of the above, return ONLY a valid JSON object (no markdown fences, no commentary) with exactly this shape:
 {{
@@ -75,12 +83,45 @@ Based on all of the above, return ONLY a valid JSON object (no markdown fences, 
 JSON:"""
 
 
-def _call_ollama(prompt: str) -> str:
+# For skills the deterministic matcher couldn't find literally, we ask the
+# LLM ONE follow-up question: is this specific gap reasonably implied by what
+# the candidate actually has (e.g. Java experience implies basic OOP)? This
+# is a narrow yes/no/reason judgment per skill, not a re-derivation of the
+# whole match — which keeps it far less prone to hallucination than asking
+# the LLM to reconstruct matched/missing from scratch.
+INFERENCE_PROMPT = """You are an expert technical recruiter assessing implied skills.
+
+The candidate's resume lists these skills: {candidate_skills}
+Their job titles: {candidate_titles}
+Their total experience: {candidate_experience} years
+
+The following required/preferred job skills were NOT explicitly listed in their resume:
+{missing_skills}
+
+For each missing skill, decide if it is REASONABLY implied by the candidate's actual
+listed skills and experience (e.g. someone listing Java and C++ can reasonably be
+assumed to understand basic OOP concepts, since OOP is fundamental to both languages).
+Do NOT assume skills that require distinct, separate knowledge — e.g. knowing Python
+does NOT imply knowing SQL, and experience with one database does NOT imply knowing a
+different specific database product.
+
+Return ONLY a valid JSON array (no markdown fences, no commentary), one object per
+missing skill, in exactly this shape:
+[
+  {{"skill": "the exact skill name as given", "implied": true or false, "reason": "one short sentence"}}
+]
+
+Missing skills to assess: {missing_skills}
+
+JSON:"""
+
+
+def _call_ollama(prompt: str, model: str) -> str:
     try:
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": OLLAMA_MODEL,
+                "model": model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.1, "num_predict": 1024},
@@ -94,8 +135,8 @@ def _call_ollama(prompt: str) -> str:
             status_code=503,
             detail=(
                 "Could not reach Ollama. Make sure it's running "
-                f"(`ollama serve`) and the model `{OLLAMA_MODEL}` is pulled "
-                f"(`ollama pull {OLLAMA_MODEL}`)."
+                f"(`ollama serve`) and the model `{model}` is pulled "
+                f"(`ollama pull {model}`)."
             ),
         )
     except requests.exceptions.Timeout:
@@ -121,17 +162,71 @@ def _parse_json_response(raw: str) -> dict:
         )
 
 
+def _parse_month_year(value: str):
+    """Parse strings like 'Dec 2025', 'February 2026', or 'Present'/'Current'
+    into a datetime. Returns None if it can't be parsed — callers must
+    handle that by skipping the entry, never guessing."""
+    if not value or not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value.lower() in ("present", "current", "now", "ongoing", "till date"):
+        return datetime.today()
+    try:
+        # default day=1 avoids dateutil guessing today's day-of-month
+        return date_parser.parse(value, default=datetime(1900, 1, 1))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _compute_experience_years(experience_entries) -> float | None:
+    """Sum durations from explicit start/end dates. Returns None (not 0) if
+    no entries were parseable at all, so callers can fall back to the LLM's
+    own estimate rather than wrongly zeroing out real experience due to a
+    date format we didn't recognize."""
+    if not experience_entries:
+        return None
+
+    total_months = 0
+    parsed_any = False
+    for entry in experience_entries:
+        if not isinstance(entry, dict):
+            continue
+        start = _parse_month_year(entry.get("start_date", ""))
+        end = _parse_month_year(entry.get("end_date", ""))
+        if not start or not end:
+            continue
+        months = (end.year - start.year) * 12 + (end.month - start.month)
+        if months > 0:
+            total_months += months
+            parsed_any = True
+
+    if not parsed_any:
+        return None
+    return round(total_months / 12, 2)
+
+
 def extract_resume_fields(text: str) -> dict:
     prompt = RESUME_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_ollama(prompt)
+    raw = _call_ollama(prompt, model=OLLAMA_EXTRACTION_MODEL)
     data = _parse_json_response(raw)
     data["raw_text"] = text
+
+    # Prefer a deterministic experience calculation over the LLM's own
+    # total_experience_years figure — small local models have repeatedly
+    # proven unreliable at this kind of arithmetic (e.g. estimating "2
+    # years" from a resume with a single 3-month internship). If we got
+    # parseable date ranges, recompute from those instead of trusting the
+    # model's own guess.
+    computed_years = _compute_experience_years(data.get("experience_entries"))
+    if computed_years is not None:
+        data["total_experience_years"] = computed_years
+
     return data
 
 
 def extract_jd_fields(text: str) -> dict:
     prompt = JD_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_ollama(prompt)
+    raw = _call_ollama(prompt, model=OLLAMA_EXTRACTION_MODEL)
     data = _parse_json_response(raw)
     data["raw_text"] = text
     return data
@@ -184,26 +279,94 @@ def compute_skill_match(jd_data: dict, resume_data: dict) -> dict:
     }
 
 
+def _parse_json_array_response(raw: str) -> list:
+    """Same cleanup as _parse_json_response but for a JSON array instead of
+    an object. Returns [] on any failure rather than raising — this
+    inference step is an enhancement, not critical path, so a failure here
+    should never break scoring."""
+    try:
+        cleaned = raw.strip()
+        cleaned = re.sub(r"^```(json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(0)
+        result = json.loads(cleaned)
+        return result if isinstance(result, list) else []
+    except Exception:
+        return []
+
+
+def infer_implied_skills(missing_skills: list, resume_data: dict) -> list:
+    """Ask the LLM, in one call, which of the still-missing skills are
+    reasonably implied by the candidate's actual background. Returns a list
+    of {"skill": ..., "reason": ...} for skills judged as implied."""
+    if not missing_skills:
+        return []
+
+    prompt = INFERENCE_PROMPT.format(
+        candidate_skills=", ".join(resume_data.get("skills", []) or []) or "none listed",
+        candidate_titles=", ".join(resume_data.get("job_titles", []) or []) or "none listed",
+        candidate_experience=resume_data.get("total_experience_years", 0) or 0,
+        missing_skills=", ".join(missing_skills),
+    )
+
+    try:
+        raw = _call_ollama(prompt, model=OLLAMA_SCORING_MODEL)
+    except HTTPException:
+        return []  # if Ollama is briefly unreachable, degrade gracefully
+
+    parsed = _parse_json_array_response(raw)
+
+    # match LLM's returned skill strings back to our original list by
+    # normalized comparison, since the model may reword slightly
+    missing_lookup = {_normalize(s): s for s in missing_skills}
+    inferred = []
+    for item in parsed:
+        if not isinstance(item, dict) or not item.get("implied"):
+            continue
+        skill_norm = _normalize(str(item.get("skill", "")))
+        if skill_norm in missing_lookup:
+            inferred.append({"skill": missing_lookup[skill_norm], "reason": item.get("reason", "")})
+
+    return inferred
+
+
 def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
     match = compute_skill_match(jd_data, resume_data)
+
+    inferred = infer_implied_skills(match["missing_skills"], resume_data)
+    inferred_skill_names = {i["skill"] for i in inferred}
+    final_missing = [s for s in match["missing_skills"] if s not in inferred_skill_names]
+    # tag inferred matches so the UI never presents a judgment call as a literal match
+    final_matched = match["matched_skills"] + [f"{i['skill']} (inferred)" for i in inferred]
+
+    candidate_experience = resume_data.get("total_experience_years", 0) or 0
+    min_experience = jd_data.get("min_experience_years", 0) or 0
+    # Computed in Python, not left for the LLM to judge — small models have
+    # shown a tendency to misjudge or invent numbers here, even inventing a
+    # "required" figure that was never actually stated (e.g. claiming a
+    # candidate falls short of "3 years" when the real requirement was 0).
+    experience_status = "MET" if candidate_experience >= min_experience else "NOT MET"
 
     prompt = SCORING_PROMPT.format(
         required_skills=", ".join(jd_data.get("required_skills", []) or []) or "none listed",
         preferred_skills=", ".join(jd_data.get("preferred_skills", []) or []) or "none listed",
-        min_experience=jd_data.get("min_experience_years", 0) or 0,
+        min_experience=min_experience,
         education_requirement=jd_data.get("education_requirement") or "not specified",
-        candidate_experience=resume_data.get("total_experience_years", 0) or 0,
+        candidate_experience=candidate_experience,
         candidate_education=json.dumps(resume_data.get("education", [])),
         candidate_titles=", ".join(resume_data.get("job_titles", []) or []) or "none listed",
-        matched_skills=", ".join(match["matched_skills"]) or "none",
-        missing_skills=", ".join(match["missing_skills"]) or "none",
+        matched_skills=", ".join(final_matched) or "none",
+        missing_skills=", ".join(final_missing) or "none",
+        experience_status=experience_status,
     )
-    raw = _call_ollama(prompt)
+    raw = _call_ollama(prompt, model=OLLAMA_SCORING_MODEL)
     llm_result = _parse_json_response(raw)
 
     return {
         "score": llm_result.get("score", 0),
-        "matched_skills": match["matched_skills"],
-        "missing_skills": match["missing_skills"],
+        "matched_skills": final_matched,
+        "missing_skills": final_missing,
         "justification": llm_result.get("justification", ""),
     }

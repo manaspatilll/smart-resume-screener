@@ -19,6 +19,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS resumes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT,
+                content_hash TEXT UNIQUE,
                 raw_text TEXT,
                 extracted_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -37,6 +38,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(job_id) REFERENCES jobs(id),
                 FOREIGN KEY(resume_id) REFERENCES resumes(id)
+                UNIQUE(job_id, resume_id)
             )
         """)
         conn.commit()
@@ -62,21 +64,29 @@ def save_job(title: str, raw_text: str, extracted: dict) -> int:
         return cur.lastrowid
 
 
-def save_resume(filename: str, raw_text: str, extracted: dict) -> int:
+def save_resume(filename: str, raw_text: str, extracted: dict, content_hash: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO resumes (filename, raw_text, extracted_json) VALUES (?, ?, ?)",
-            (filename, raw_text, json.dumps(extracted)),
+            "INSERT INTO resumes (filename, content_hash, raw_text, extracted_json) VALUES (?, ?, ?, ?)",
+            (filename, content_hash, raw_text, json.dumps(extracted)),
         )
         conn.commit()
         return cur.lastrowid
+
+
+def get_resume_by_hash(content_hash: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM resumes WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def save_score(job_id: int, resume_id: int, score: float, matched: list,
                missing: list, justification: str, shortlisted: bool):
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO scores
+            """INSERT OR REPLACE INTO scores
                (job_id, resume_id, score, matched_skills, missing_skills, justification, shortlisted)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (job_id, resume_id, score, json.dumps(matched), json.dumps(missing),

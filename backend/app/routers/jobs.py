@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional, Union
 from app.services.file_parser import extract_text_from_upload
-from app.services import llm_service
+from app.services.extraction import extract_jd_fields
 from app import database as db
 from app.models import JobCreateResponse, ExtractedJD
 
@@ -29,7 +29,7 @@ async def create_job(
     else:
         raw_text = text
 
-    extracted = llm_service.extract_jd_fields(raw_text)
+    extracted = extract_jd_fields(raw_text)
     job_id = db.save_job(title or extracted.get("title") or "Untitled Role", raw_text, extracted)
 
     return JobCreateResponse(job_id=job_id, extracted=ExtractedJD(**extracted))
