@@ -4,7 +4,23 @@ from datetime import datetime
 import requests
 from dateutil import parser as date_parser
 from fastapi import HTTPException
-from app.config import OLLAMA_HOST, OLLAMA_EXTRACTION_MODEL, OLLAMA_SCORING_MODEL
+from app.config import (
+    LLM_PROVIDER,
+    OLLAMA_HOST,
+    OLLAMA_EXTRACTION_MODEL,
+    OLLAMA_SCORING_MODEL,
+    GROQ_API_KEY,
+    GROQ_HOST,
+    GROQ_EXTRACTION_MODEL,
+    GROQ_SCORING_MODEL,
+)
+
+# Maps the provider-agnostic "extraction"/"scoring" roles used throughout
+# this module to the actual model name for whichever provider is active.
+_MODEL_BY_ROLE = {
+    "ollama": {"extraction": OLLAMA_EXTRACTION_MODEL, "scoring": OLLAMA_SCORING_MODEL},
+    "groq": {"extraction": GROQ_EXTRACTION_MODEL, "scoring": GROQ_SCORING_MODEL},
+}
 
 RESUME_EXTRACTION_PROMPT = """You are a resume parsing engine. Extract structured information from the resume text below.
 
@@ -146,6 +162,49 @@ def _call_ollama(prompt: str, model: str) -> str:
         raise HTTPException(status_code=504, detail="LLM request timed out.")
 
 
+def _call_groq(prompt: str, model: str) -> str:
+    if not GROQ_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="GROQ_API_KEY is not set. Add it to backend/.env (get one at "
+            "https://console.groq.com/keys), or set LLM_PROVIDER=ollama to use a local model.",
+        )
+    try:
+        response = requests.post(
+            f"{GROQ_HOST}/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                # Groq's OpenAI-compatible JSON mode — the prompt must itself
+                # ask for JSON (ours do), this just enforces it server-side.
+                "response_format": {"type": "json_object"},
+            },
+            timeout=60,
+        )
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Groq rejected the API key. Check GROQ_API_KEY in backend/.env.")
+        if response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Groq rate limit hit. Wait a moment and retry, or lower request volume.")
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="Could not reach Groq API. Check your internet connection.")
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Groq request timed out.")
+
+
+def _call_llm(prompt: str, role: str) -> str:
+    """Provider-agnostic entry point. `role` is 'extraction' or 'scoring' —
+    resolved to the right model name for whichever provider is active."""
+    model = _MODEL_BY_ROLE[LLM_PROVIDER][role]
+    if LLM_PROVIDER == "groq":
+        return _call_groq(prompt, model=model)
+    return _call_ollama(prompt, model=model)
+
+
 def _parse_json_response(raw: str) -> dict:
     """LLMs often wrap JSON in markdown fences or add stray text. Clean it up."""
     cleaned = raw.strip()
@@ -210,7 +269,7 @@ def _compute_experience_years(experience_entries) -> float | None:
 
 def extract_resume_fields(text: str) -> dict:
     prompt = RESUME_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_ollama(prompt, model=OLLAMA_EXTRACTION_MODEL)
+    raw = _call_llm(prompt, role="extraction")
     data = _parse_json_response(raw)
     data["raw_text"] = text
 
@@ -229,7 +288,7 @@ def extract_resume_fields(text: str) -> dict:
 
 def extract_jd_fields(text: str) -> dict:
     prompt = JD_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_ollama(prompt, model=OLLAMA_EXTRACTION_MODEL)
+    raw = _call_llm(prompt, role="extraction")
     data = _parse_json_response(raw)
     data["raw_text"] = text
     return data
@@ -316,9 +375,9 @@ def infer_implied_skills(missing_skills: list, resume_data: dict) -> list:
     )
 
     try:
-        raw = _call_ollama(prompt, model=OLLAMA_SCORING_MODEL)
+        raw = _call_llm(prompt, role="scoring")
     except HTTPException:
-        return []  # if Ollama is briefly unreachable, degrade gracefully
+        return []  # if Groq/Ollama is briefly unreachable, degrade gracefully
 
     parsed = _parse_json_array_response(raw)
 
@@ -356,7 +415,7 @@ def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
         experience_status=experience_status,
     )
 
-    raw = _call_ollama(prompt, model=OLLAMA_SCORING_MODEL)
+    raw = _call_llm(prompt, role="scoring")
     llm_result = _parse_json_response(raw)
 
    # llama3.2 occasionally nests the whole result under a "score" key
