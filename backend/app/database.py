@@ -119,3 +119,11 @@ def get_scores_for_job(job_id: int):
             "SELECT * FROM scores WHERE job_id = ? ORDER BY score DESC", (job_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+    
+    
+def reset_db():
+    with get_conn() as conn:
+        conn.execute("DROP TABLE IF EXISTS scores")
+        conn.execute("DROP TABLE IF EXISTS resumes")
+        conn.execute("DROP TABLE IF EXISTS jobs")
+        conn.commit()

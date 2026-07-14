@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database import init_db
+from app.database import init_db, reset_db
 from app.routers import jobs, resumes, screening
 
 app = FastAPI(
@@ -24,6 +24,7 @@ app.include_router(screening.router)
 
 @app.on_event("startup")
 def on_startup():
+    reset_db()
     init_db()
 
 

@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, UploadFile, File
 from typing import List
 from app.services.file_parser import extract_text_from_upload
-from app.services import llm_service
+from app.services import extraction
 from app import database as db
 from app.models import ResumeUploadResponse, ExtractedResume
 
@@ -22,7 +22,7 @@ async def _process_single(file: UploadFile, content: bytes) -> ResumeUploadRespo
         extracted = json.loads(existing["extracted_json"])
         return ResumeUploadResponse(resume_id=existing["id"], extracted=ExtractedResume(**extracted))
     raw_text = extract_text_from_upload(file, content)
-    extracted = await asyncio.to_thread(llm_service.extract_resume_fields, raw_text)
+    extracted = extraction.extract_resume_fields(raw_text)
     resume_id = db.save_resume(file.filename, raw_text, extracted, content_hash)
     return ResumeUploadResponse(resume_id=resume_id, extracted=ExtractedResume(**extracted))
 

@@ -17,8 +17,6 @@ function App() {
     setError(null)
     setResults([])
     try {
-      // Only screen the resumes uploaded in THIS session — not every
-      // resume ever stored in the database from past test runs.
       const resumeIds = resumes.map((r) => r.resume_id)
       const data = await runScreening(job.job_id, resumeIds)
       setResults(data.results)
@@ -27,6 +25,11 @@ function App() {
     } finally {
       setScreening(false)
     }
+  }
+
+  const handleDeleteResume = (resumeId) => {
+    setResumes((prev) => prev.filter((r) => r.resume_id !== resumeId))
+    setResults([])
   }
 
   return (
@@ -38,20 +41,18 @@ function App() {
         </p>
       </header>
 
-      <UploadJD onJobCreated={setJob} />
-      {job && (
-        <p className="status-line">
-          ✓ Job processed: <strong>{job.extracted.title || 'Untitled Role'}</strong> —{' '}
-          {job.extracted.required_skills.length} required skill{job.extracted.required_skills.length === 1 ? '' : 's'} detected
-        </p>
-      )}
+      <UploadJD
+        onJobCreated={(data) => { setJob(data); setResults([]) }}
+        job={job}
+        onClear={() => { setJob(null); setResults([]) }}
+      />
 
-      <UploadResumes onResumesUploaded={(data) => setResumes((prev) => [...prev, ...data])} />
-      {resumes.length > 0 && (
-        <p className="status-line">
-          ✓ {resumes.length} resume{resumes.length > 1 ? 's' : ''} processed and ready
-        </p>
-      )}
+      <UploadResumes
+        onResumesUploaded={(data) => setResumes((prev) => [...prev, ...data])}
+        resumes={resumes}
+        onDeleteResume={handleDeleteResume}
+        onClearResumes={() => { setResumes([]); setResults([]) }}
+      />
 
       {job && resumes.length > 0 && (
         <div className="card">
@@ -59,7 +60,7 @@ function App() {
             {screening && <span className="spinner" />}
             {screening ? 'Scoring candidates…' : `Run Screening on ${resumes.length} Resume${resumes.length > 1 ? 's' : ''}`}
           </button>
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" style={{ marginTop: 10 }}>{error}</p>}
         </div>
       )}
 

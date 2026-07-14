@@ -1,9 +1,11 @@
+import json
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional, Union
 from app.services.file_parser import extract_text_from_upload
 from app.services.extraction import extract_jd_fields
 from app import database as db
-from app.models import JobCreateResponse, ExtractedJD
+from app.models import JobCreateResponse, ExtractedJD, Job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -35,9 +37,13 @@ async def create_job(
     return JobCreateResponse(job_id=job_id, extracted=ExtractedJD(**extracted))
 
 
-@router.get("/{job_id}")
+@router.get("/{job_id}", response_model=Job)
 def get_job(job_id: int):
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return Job(
+        id=job["id"],
+        title=job["title"],
+        extracted=ExtractedJD(**json.loads(job["extracted_json"])),
+    )

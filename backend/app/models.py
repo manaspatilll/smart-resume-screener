@@ -51,3 +51,8 @@ class ResumeUploadResponse(BaseModel):
 class ScreeningResponse(BaseModel):
     job_id: int
     results: List[ScoreResult]
+
+class Job(BaseModel):
+    id: int
+    title: Optional[str]
+    extracted: ExtractedJD

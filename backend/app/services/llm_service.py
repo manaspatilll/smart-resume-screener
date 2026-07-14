@@ -293,7 +293,8 @@ def _parse_json_array_response(raw: str) -> list:
             cleaned = match.group(0)
         result = json.loads(cleaned)
         return result if isinstance(result, list) else []
-    except Exception:
+    except Exception as e:
+        print(f"[infer_implied_skills] failed to parse LLM response: {e}\nRaw: {raw[:200]}")
         return []
 
 

@@ -14,5 +14,5 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_EXTRACTION_MODEL = os.getenv("OLLAMA_EXTRACTION_MODEL", "llama3.2")
 OLLAMA_SCORING_MODEL = os.getenv("OLLAMA_SCORING_MODEL", "llama3.2")
 
-SHORTLIST_THRESHOLD = int(os.getenv("SHORTLIST_THRESHOLD", "70"))
+SHORTLIST_THRESHOLD = float(os.getenv("SHORTLIST_THRESHOLD", "70"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./resume_screener.db")

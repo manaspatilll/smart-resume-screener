@@ -1,3 +1,4 @@
+import asyncio
 import json
 from fastapi import APIRouter, HTTPException
 from typing import List, Optional
@@ -16,7 +17,7 @@ class ScreenRequest(BaseModel):
 
 
 @router.post("/run", response_model=ScreeningResponse)
-def run_screening(req: ScreenRequest):
+async def run_screening(req: ScreenRequest):
     job = db.get_job(req.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -31,10 +32,9 @@ def run_screening(req: ScreenRequest):
     if not resumes:
         raise HTTPException(status_code=400, detail="No resumes found to screen.")
 
-    results = []
-    for resume in resumes:
+    async def score_one(resume):
         resume_data = json.loads(resume["extracted_json"])
-        score_data = llm_service.score_resume_against_jd(resume_data, jd_data)
+        score_data = await asyncio.to_thread(llm_service.score_resume_against_jd, resume_data, jd_data)
 
         score = float(score_data.get("score", 0))
         matched = score_data.get("matched_skills", [])
@@ -44,18 +44,18 @@ def run_screening(req: ScreenRequest):
 
         db.save_score(req.job_id, resume["id"], score, matched, missing, justification, shortlisted)
 
-        results.append(
-            ScoreResult(
-                resume_id=resume["id"],
-                candidate_name=resume_data.get("name") or resume["filename"],
-                score=score,
-                matched_skills=matched,
-                missing_skills=missing,
-                justification=justification,
-                shortlisted=shortlisted,
-            )
+        resume_data_name = json.loads(resume["extracted_json"]).get("name")
+        return ScoreResult(
+            resume_id=resume["id"],
+            candidate_name=resume_data.get("name") or resume["filename"],
+            score=score,
+            matched_skills=matched,
+            missing_skills=missing,
+            justification=justification,
+            shortlisted=shortlisted,
         )
 
+    results = list(await asyncio.gather(*[score_one(r) for r in resumes]))
     results.sort(key=lambda r: r.score, reverse=True)
     return ScreeningResponse(job_id=req.job_id, results=results)
 
