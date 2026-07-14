@@ -34,9 +34,23 @@ async def run_screening(req: ScreenRequest):
 
     async def score_one(resume):
         resume_data = json.loads(resume["extracted_json"])
-        score_data = await asyncio.to_thread(llm_service.score_resume_against_jd, resume_data, jd_data)
+        try:
+            score_data = await asyncio.wait_for(
+                asyncio.to_thread(llm_service.score_resume_against_jd, resume_data, jd_data),
+                timeout=290
+            )
+        except asyncio.TimeoutError:
+            return ScoreResult(
+                resume_id=resume["id"],
+                candidate_name=resume_data.get("name") or resume["filename"],
+                score=0,
+                matched_skills=[],
+                missing_skills=[],
+                justification="Scoring timed out — LLM took too long for this resume.",
+                shortlisted=False,
+            )
 
-        score = float(score_data.get("score", 0))
+        score = float(score_data.get("score", 0) or 0)
         matched = score_data.get("matched_skills", [])
         missing = score_data.get("missing_skills", [])
         justification = score_data.get("justification", "")
@@ -44,7 +58,6 @@ async def run_screening(req: ScreenRequest):
 
         db.save_score(req.job_id, resume["id"], score, matched, missing, justification, shortlisted)
 
-        resume_data_name = json.loads(resume["extracted_json"]).get("name")
         return ScoreResult(
             resume_id=resume["id"],
             candidate_name=resume_data.get("name") or resume["filename"],

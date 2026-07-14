@@ -69,15 +69,17 @@ Candidate profile:
 - Education: {candidate_education}
 - Job titles held: {candidate_titles}
 
-Already-confirmed facts (do not contradict these):
-- Skills the candidate HAS that the job wants: {matched_skills}
-- Skills the job wants that the candidate is MISSING: {missing_skills}
-- Experience requirement: {experience_status} (candidate has {candidate_experience} years, job requires {min_experience} years)
+Already-confirmed matched skills: {matched_skills}
+Skills not found in resume: {missing_skills}
+Experience requirement: {experience_status} (candidate has {candidate_experience} years, job requires {min_experience} years)
 
-Based on all of the above, return ONLY a valid JSON object (no markdown fences, no commentary) with exactly this shape:
+For each missing skill, first decide if it is reasonably implied by the candidate's confirmed skills and experience. Then produce a score and justification.
+
+Return ONLY a valid JSON object (no markdown fences, no commentary):
 {{
-  "score": number (0-100, weight required skills and experience heavily, preferred skills lightly),
-  "justification": "2-4 sentences explaining the score for a hiring manager, referencing the matched/missing skills and experience fit above"
+  "inferred_skills": ["skill1", "skill2"],
+  "score": number (0-100),
+  "justification": "2-3 sentences for a hiring manager"
 }}
 
 JSON:"""
@@ -124,9 +126,10 @@ def _call_ollama(prompt: str, model: str) -> str:
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
+                "format": "json",
                 "options": {"temperature": 0.1, "num_predict": 1024},
             },
-            timeout=120,
+            timeout=300,
         )
         response.raise_for_status()
         return response.json().get("response", "")
@@ -336,18 +339,8 @@ def infer_implied_skills(missing_skills: list, resume_data: dict) -> list:
 def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
     match = compute_skill_match(jd_data, resume_data)
 
-    inferred = infer_implied_skills(match["missing_skills"], resume_data)
-    inferred_skill_names = {i["skill"] for i in inferred}
-    final_missing = [s for s in match["missing_skills"] if s not in inferred_skill_names]
-    # tag inferred matches so the UI never presents a judgment call as a literal match
-    final_matched = match["matched_skills"] + [f"{i['skill']} (inferred)" for i in inferred]
-
     candidate_experience = resume_data.get("total_experience_years", 0) or 0
     min_experience = jd_data.get("min_experience_years", 0) or 0
-    # Computed in Python, not left for the LLM to judge — small models have
-    # shown a tendency to misjudge or invent numbers here, even inventing a
-    # "required" figure that was never actually stated (e.g. claiming a
-    # candidate falls short of "3 years" when the real requirement was 0).
     experience_status = "MET" if candidate_experience >= min_experience else "NOT MET"
 
     prompt = SCORING_PROMPT.format(
@@ -358,15 +351,26 @@ def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
         candidate_experience=candidate_experience,
         candidate_education=json.dumps(resume_data.get("education", [])),
         candidate_titles=", ".join(resume_data.get("job_titles", []) or []) or "none listed",
-        matched_skills=", ".join(final_matched) or "none",
-        missing_skills=", ".join(final_missing) or "none",
+        matched_skills=", ".join(match["matched_skills"]) or "none",
+        missing_skills=", ".join(match["missing_skills"]) or "none",
         experience_status=experience_status,
     )
+
     raw = _call_ollama(prompt, model=OLLAMA_SCORING_MODEL)
     llm_result = _parse_json_response(raw)
 
+   # llama3.2 occasionally nests the whole result under a "score" key
+    if "score" in llm_result and isinstance(llm_result["score"], dict):
+        llm_result = llm_result["score"]
+
+    inferred = llm_result.get("inferred_skills", [])
+    inferred_set = {_normalize(s) for s in inferred}
+
+    final_matched = match["matched_skills"] + [f"{s} (inferred)" for s in inferred if _normalize(s) in {_normalize(m) for m in match["missing_skills"]}]
+    final_missing = [s for s in match["missing_skills"] if _normalize(s) not in inferred_set]
+
     return {
-        "score": llm_result.get("score", 0),
+        "score": float(llm_result.get("score", 0) or 0),
         "matched_skills": final_matched,
         "missing_skills": final_missing,
         "justification": llm_result.get("justification", ""),
