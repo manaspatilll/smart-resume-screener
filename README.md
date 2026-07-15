@@ -46,21 +46,6 @@ An AI-powered recruitment tool that extracts structured data from resumes and jo
                                          - produce score + justification
 ```
 
-## Design Decisions
-
-**Why is extraction done in Python, not the LLM?**
-The previous LLM-based extraction (Ollama, `gemma2:2b`) took 1–2 minutes per document on CPU and was unreliable — it dropped explicitly-listed skills, fabricated experience durations, and failed to follow instructions like "don't count extracurricular roles as experience." Moving extraction to Python (regex + a curated skill taxonomy) made it near-instant and fully reproducible. This is exactly how real-world ATS systems work: deterministic parsing for extraction, semantic judgment only where it's actually needed.
-
-**Why is skill matching done in Python, not the LLM?**
-Small models are unreliable at exact set comparison — in testing, models occasionally claimed a candidate was "missing" a skill clearly present in their profile. Matched/missing skills are computed deterministically in Python and passed to the LLM as confirmed facts, so the score is never built on a hallucinated foundation.
-
-**Why Groq instead of a local model?**
-Local models (Ollama, `gemma2:2b`) were the original approach — no API cost, fully offline. But for a scoring task that only needs one short structured output per resume, Groq's free tier (`llama-3.1-8b-instant`, ~500 tok/s) is dramatically faster with no hardware dependency, no timeout issues, and 14,400 requests/day on the free plan — more than enough for demo and assessment use.
-
-**Why one LLM call per resume instead of two?**
-The scoring prompt already asks the model for `inferred_skills` alongside the score and justification. A separate inference call (previous approach) was redundant — same context, same model, same output, just split across two round trips. Merging them halves Groq API usage and shaves latency.
-
-**Known limitation:** Python extraction matches skills that are explicitly listed in the document against the built-in taxonomy. Unusually-phrased resumes or JDs that don't use standard terminology may extract fewer skills than an LLM would. Both test JDs used clear markers (`Must have:`, `Nice to have:`), which the extractor handles well.
 
 ## Setup
 
@@ -137,8 +122,6 @@ smart-resume-screener/
 ```
 
 ## Possible Extensions
-- Swap `llama-3.1-8b-instant` for `llama-3.3-70b-versatile` via `GROQ_MODEL` env var for stronger scoring reasoning
 - Add embedding-based semantic skill matching to catch implied skills beyond what the LLM inference step covers
 - Add CSV/PDF export of screening results
 - Add authentication for multi-recruiter use
-- Fallback to Ollama when Groq is rate-limited (`LLM_PROVIDER=ollama` in `.env`)
