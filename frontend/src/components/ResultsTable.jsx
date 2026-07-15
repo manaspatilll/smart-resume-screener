@@ -1,5 +1,4 @@
 export default function ResultsTable({ results, ready, screening }) {
-  // Nothing to show at all until a JD + resumes are both ready
   if (!ready) return null
 
   return (

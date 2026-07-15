@@ -2,17 +2,6 @@ import re
 from datetime import datetime
 from dateutil import parser as date_parser
 
-# ---------------------------------------------------------------------------
-# Deterministic (non-LLM) extraction for resumes and job descriptions.
-#
-# Why: LLM-based extraction (previous approach) was slow (1-2 min/document
-# on CPU) and, worse, unreliable — it dropped explicitly-listed skills,
-# fabricated experience durations, and inconsistently followed instructions
-# like "don't count extracurricular roles as experience." Real-world ATS
-# systems (Workday, Greenhouse, etc.) use exactly this kind of keyword/regex
-# matching for extraction, reserving semantic judgment (the LLM) for the one
-# place it's actually needed: computing the match score.
-# ---------------------------------------------------------------------------
 
 SKILL_KEYWORDS = [
     # Languages
@@ -50,8 +39,6 @@ SKILL_KEYWORDS = [
     "Jupyter", "Google Colab", "VS Code", "IntelliJ", "Eclipse", "Figma",
 ]
 
-# longest-first so multi-word skills (e.g. "Machine Learning") are checked
-# before their substrings could partially confuse shorter single-word ones
 _SKILL_KEYWORDS_LOWER = sorted(set(s.lower() for s in SKILL_KEYWORDS), key=len, reverse=True)
 
 MONTH_YEAR_RANGE_RE = re.compile(
@@ -145,8 +132,6 @@ def extract_resume_fields(text: str) -> dict:
     email_match = EMAIL_RE.search(text)
     phone_match = PHONE_RE.search(text)
 
-    # Name: first short, digit-free, "@"-free line — the near-universal
-    # convention of putting the candidate's name as the very first line.
     name = None
     for line in text.split('\n'):
         stripped = line.strip()
@@ -156,7 +141,6 @@ def extract_resume_fields(text: str) -> dict:
 
     skills = _find_skills_in_text(text)
 
-    # Experience entries ONLY from sections genuinely about paid work
     # (EXPERIENCE / WORK EXPERIENCE / PROFESSIONAL EXPERIENCE) — explicitly
     # NOT from EXTRA-CURRICULAR, PROJECTS, or EDUCATION sections.
     experience_entries = []
@@ -233,7 +217,7 @@ def extract_jd_fields(text: str) -> dict:
             # bullets describe baseline expectations, not optional extras
             required_skills.update(line_skills)
 
-    preferred_skills -= required_skills  # required is the stronger signal
+    preferred_skills -= required_skills
 
     min_experience = 0
     exp_matches = YEARS_EXPERIENCE_RE.findall(text)

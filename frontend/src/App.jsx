@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import LandingPage from './components/LandingPage'
 import UploadJD from './components/UploadJD'
 import UploadResumes from './components/UploadResumes'
 import ResultsTable from './components/ResultsTable'
 import { runScreening } from './api'
 
-function App() {
+function ScreenerApp() {
   const [job, setJob] = useState(null)
   const [resumes, setResumes] = useState([])
   const [results, setResults] = useState([])
@@ -37,7 +38,7 @@ function App() {
       <header>
         <h1>Smart Resume Screener</h1>
         <p className="subtitle">
-          Extract, score, and shortlist candidates against a job description — powered by a local LLM.
+          Extract, score, and shortlist candidates against a job description.
         </p>
       </header>
 
@@ -67,6 +68,33 @@ function App() {
       <ResultsTable results={results} screening={screening} ready={Boolean(job && resumes.length > 0)} />
     </div>
   )
+}
+
+function getViewFromLocation() {
+  return window.location.hash === '#app' ? 'app' : 'landing'
+}
+
+function App() {
+  const [view, setView] = useState(getViewFromLocation)
+
+  useEffect(() => {
+    const handlePopState = () => setView(getViewFromLocation())
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  const goToApp = useCallback(() => {
+    if (window.location.hash !== '#app') {
+      window.history.pushState({ view: 'app' }, '', '#app')
+    }
+    setView('app')
+  }, [])
+
+  if (view === 'landing') {
+    return <LandingPage onLaunch={goToApp} />
+  }
+
+  return <ScreenerApp />
 }
 
 export default App

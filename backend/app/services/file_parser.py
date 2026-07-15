@@ -40,7 +40,6 @@ def _extract_pdf(content: bytes) -> str:
 def _extract_docx(content: bytes) -> str:
     document = docx.Document(io.BytesIO(content))
     paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-    # also pull text from tables (common in resumes)
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:

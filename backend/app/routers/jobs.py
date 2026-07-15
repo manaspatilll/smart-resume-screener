@@ -17,8 +17,6 @@ async def create_job(
     title: Optional[str] = Form(None),
 ):
     """Create a job description either from an uploaded file (PDF/DOCX/TXT) or raw pasted text."""
-    # Swagger UI (and some HTML forms) send an empty string "" for an unset
-    # optional file field instead of omitting it — normalize that to None.
     if isinstance(file, str) or not getattr(file, "filename", None):
         file = None
 

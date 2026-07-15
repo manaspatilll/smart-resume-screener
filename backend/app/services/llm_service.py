@@ -1,77 +1,21 @@
 import json
 import re
-from datetime import datetime
 import requests
-from dateutil import parser as date_parser
 from fastapi import HTTPException
 from app.config import (
     LLM_PROVIDER,
     OLLAMA_HOST,
-    OLLAMA_EXTRACTION_MODEL,
     OLLAMA_SCORING_MODEL,
     GROQ_API_KEY,
     GROQ_HOST,
-    GROQ_EXTRACTION_MODEL,
     GROQ_SCORING_MODEL,
 )
 
-# Maps the provider-agnostic "extraction"/"scoring" roles used throughout
-# this module to the actual model name for whichever provider is active.
 _MODEL_BY_ROLE = {
-    "ollama": {"extraction": OLLAMA_EXTRACTION_MODEL, "scoring": OLLAMA_SCORING_MODEL},
-    "groq": {"extraction": GROQ_EXTRACTION_MODEL, "scoring": GROQ_SCORING_MODEL},
+    "ollama": {"scoring": OLLAMA_SCORING_MODEL},
+    "groq": {"scoring": GROQ_SCORING_MODEL},
 }
 
-RESUME_EXTRACTION_PROMPT = """You are a resume parsing engine. Extract structured information from the resume text below.
-
-Return ONLY a valid JSON object (no markdown fences, no commentary) with exactly this shape:
-{{
-  "name": string or null,
-  "email": string or null,
-  "phone": string or null,
-  "skills": [list of technical/soft skills mentioned, deduplicated, as short strings],
-  "experience_entries": [list of PAID internships/jobs only — do NOT include student clubs,
-    volunteer roles, or education — each as {{"role": string, "start_date": "Mon YYYY" format
-    e.g. 'Dec 2025', "end_date": "Mon YYYY" format or 'Present' if ongoing}}],
-  "total_experience_years": number (your best estimate as a fallback; this will be
-    recalculated from experience_entries dates when possible, so accuracy here matters
-    less than getting experience_entries right),
-  "job_titles": [list of past job titles / internship roles held],
-  "education": [{{"degree": string, "institution": string, "year": string}}]
-}}
-
-Resume text:
-\"\"\"
-{text}
-\"\"\"
-
-JSON:"""
-
-JD_EXTRACTION_PROMPT = """You are a job description parsing engine. Extract structured requirements from the job description below.
-
-Return ONLY a valid JSON object (no markdown fences, no commentary) with exactly this shape:
-{{
-  "title": string or null,
-  "required_skills": [list of must-have skills/technologies],
-  "preferred_skills": [list of nice-to-have skills/technologies],
-  "min_experience_years": number (0 if not specified or entry-level),
-  "education_requirement": string or null
-}}
-
-Job description text:
-\"\"\"
-{text}
-\"\"\"
-
-JSON:"""
-
-# NOTE: matched_skills / missing_skills are NOT asked of the LLM anymore.
-# Small local models are unreliable at exact set comparison (they occasionally
-# hallucinate a skill as "missing" even when it's clearly present). Those two
-# lists are now computed deterministically in Python (see compute_skill_match
-# below) and passed in here as already-known facts. The LLM's job is narrowed
-# to what it's actually good at: producing a defensible score and a natural
-# language explanation grounded in those facts.
 SCORING_PROMPT = """You are an expert technical recruiter writing a short match assessment.
 
 Job requirements:
@@ -89,7 +33,12 @@ Already-confirmed matched skills: {matched_skills}
 Skills not found in resume: {missing_skills}
 Experience requirement: {experience_status} (candidate has {candidate_experience} years, job requires {min_experience} years)
 
-For each missing skill, first decide if it is reasonably implied by the candidate's confirmed skills and experience. Then produce a score and justification.
+For each missing skill, first decide if it is REASONABLY implied by the candidate's
+confirmed skills and experience (e.g. someone listing Java and C++ can reasonably be
+assumed to understand basic OOP concepts, since OOP is fundamental to both languages).
+Do NOT assume skills that require distinct, separate knowledge — e.g. knowing Python
+does NOT imply knowing SQL, and experience with one database does NOT imply knowing a
+different specific database product. Then produce a score and justification.
 
 Return ONLY a valid JSON object (no markdown fences, no commentary):
 {{
@@ -97,39 +46,6 @@ Return ONLY a valid JSON object (no markdown fences, no commentary):
   "score": number (0-100),
   "justification": "2-3 sentences for a hiring manager"
 }}
-
-JSON:"""
-
-
-# For skills the deterministic matcher couldn't find literally, we ask the
-# LLM ONE follow-up question: is this specific gap reasonably implied by what
-# the candidate actually has (e.g. Java experience implies basic OOP)? This
-# is a narrow yes/no/reason judgment per skill, not a re-derivation of the
-# whole match — which keeps it far less prone to hallucination than asking
-# the LLM to reconstruct matched/missing from scratch.
-INFERENCE_PROMPT = """You are an expert technical recruiter assessing implied skills.
-
-The candidate's resume lists these skills: {candidate_skills}
-Their job titles: {candidate_titles}
-Their total experience: {candidate_experience} years
-
-The following required/preferred job skills were NOT explicitly listed in their resume:
-{missing_skills}
-
-For each missing skill, decide if it is REASONABLY implied by the candidate's actual
-listed skills and experience (e.g. someone listing Java and C++ can reasonably be
-assumed to understand basic OOP concepts, since OOP is fundamental to both languages).
-Do NOT assume skills that require distinct, separate knowledge — e.g. knowing Python
-does NOT imply knowing SQL, and experience with one database does NOT imply knowing a
-different specific database product.
-
-Return ONLY a valid JSON array (no markdown fences, no commentary), one object per
-missing skill, in exactly this shape:
-[
-  {{"skill": "the exact skill name as given", "implied": true or false, "reason": "one short sentence"}}
-]
-
-Missing skills to assess: {missing_skills}
 
 JSON:"""
 
@@ -178,8 +94,6 @@ def _call_groq(prompt: str, model: str) -> str:
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
                 "max_tokens": 1024,
-                # Groq's OpenAI-compatible JSON mode — the prompt must itself
-                # ask for JSON (ours do), this just enforces it server-side.
                 "response_format": {"type": "json_object"},
             },
             timeout=60,
@@ -197,7 +111,7 @@ def _call_groq(prompt: str, model: str) -> str:
 
 
 def _call_llm(prompt: str, role: str) -> str:
-    """Provider-agnostic entry point. `role` is 'extraction' or 'scoring' —
+    """Provider-agnostic entry point. `role` is currently always 'scoring' —
     resolved to the right model name for whichever provider is active."""
     model = _MODEL_BY_ROLE[LLM_PROVIDER][role]
     if LLM_PROVIDER == "groq":
@@ -222,76 +136,6 @@ def _parse_json_response(raw: str) -> dict:
             status_code=502,
             detail=f"LLM returned malformed JSON. Raw output: {raw[:500]}",
         )
-
-
-def _parse_month_year(value: str):
-    """Parse strings like 'Dec 2025', 'February 2026', or 'Present'/'Current'
-    into a datetime. Returns None if it can't be parsed — callers must
-    handle that by skipping the entry, never guessing."""
-    if not value or not isinstance(value, str):
-        return None
-    value = value.strip()
-    if value.lower() in ("present", "current", "now", "ongoing", "till date"):
-        return datetime.today()
-    try:
-        # default day=1 avoids dateutil guessing today's day-of-month
-        return date_parser.parse(value, default=datetime(1900, 1, 1))
-    except (ValueError, OverflowError):
-        return None
-
-
-def _compute_experience_years(experience_entries) -> float | None:
-    """Sum durations from explicit start/end dates. Returns None (not 0) if
-    no entries were parseable at all, so callers can fall back to the LLM's
-    own estimate rather than wrongly zeroing out real experience due to a
-    date format we didn't recognize."""
-    if not experience_entries:
-        return None
-
-    total_months = 0
-    parsed_any = False
-    for entry in experience_entries:
-        if not isinstance(entry, dict):
-            continue
-        start = _parse_month_year(entry.get("start_date", ""))
-        end = _parse_month_year(entry.get("end_date", ""))
-        if not start or not end:
-            continue
-        months = (end.year - start.year) * 12 + (end.month - start.month)
-        if months > 0:
-            total_months += months
-            parsed_any = True
-
-    if not parsed_any:
-        return None
-    return round(total_months / 12, 2)
-
-
-def extract_resume_fields(text: str) -> dict:
-    prompt = RESUME_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_llm(prompt, role="extraction")
-    data = _parse_json_response(raw)
-    data["raw_text"] = text
-
-    # Prefer a deterministic experience calculation over the LLM's own
-    # total_experience_years figure — small local models have repeatedly
-    # proven unreliable at this kind of arithmetic (e.g. estimating "2
-    # years" from a resume with a single 3-month internship). If we got
-    # parseable date ranges, recompute from those instead of trusting the
-    # model's own guess.
-    computed_years = _compute_experience_years(data.get("experience_entries"))
-    if computed_years is not None:
-        data["total_experience_years"] = computed_years
-
-    return data
-
-
-def extract_jd_fields(text: str) -> dict:
-    prompt = JD_EXTRACTION_PROMPT.format(text=text[:8000])
-    raw = _call_llm(prompt, role="extraction")
-    data = _parse_json_response(raw)
-    data["raw_text"] = text
-    return data
 
 
 def _normalize(skill: str) -> str:
@@ -341,60 +185,6 @@ def compute_skill_match(jd_data: dict, resume_data: dict) -> dict:
     }
 
 
-def _parse_json_array_response(raw: str) -> list:
-    """Same cleanup as _parse_json_response but for a JSON array instead of
-    an object. Returns [] on any failure rather than raising — this
-    inference step is an enhancement, not critical path, so a failure here
-    should never break scoring."""
-    try:
-        cleaned = raw.strip()
-        cleaned = re.sub(r"^```(json)?", "", cleaned).strip()
-        cleaned = re.sub(r"```$", "", cleaned).strip()
-        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-        if match:
-            cleaned = match.group(0)
-        result = json.loads(cleaned)
-        return result if isinstance(result, list) else []
-    except Exception as e:
-        print(f"[infer_implied_skills] failed to parse LLM response: {e}\nRaw: {raw[:200]}")
-        return []
-
-
-def infer_implied_skills(missing_skills: list, resume_data: dict) -> list:
-    """Ask the LLM, in one call, which of the still-missing skills are
-    reasonably implied by the candidate's actual background. Returns a list
-    of {"skill": ..., "reason": ...} for skills judged as implied."""
-    if not missing_skills:
-        return []
-
-    prompt = INFERENCE_PROMPT.format(
-        candidate_skills=", ".join(resume_data.get("skills", []) or []) or "none listed",
-        candidate_titles=", ".join(resume_data.get("job_titles", []) or []) or "none listed",
-        candidate_experience=resume_data.get("total_experience_years", 0) or 0,
-        missing_skills=", ".join(missing_skills),
-    )
-
-    try:
-        raw = _call_llm(prompt, role="scoring")
-    except HTTPException:
-        return []  # if Groq/Ollama is briefly unreachable, degrade gracefully
-
-    parsed = _parse_json_array_response(raw)
-
-    # match LLM's returned skill strings back to our original list by
-    # normalized comparison, since the model may reword slightly
-    missing_lookup = {_normalize(s): s for s in missing_skills}
-    inferred = []
-    for item in parsed:
-        if not isinstance(item, dict) or not item.get("implied"):
-            continue
-        skill_norm = _normalize(str(item.get("skill", "")))
-        if skill_norm in missing_lookup:
-            inferred.append({"skill": missing_lookup[skill_norm], "reason": item.get("reason", "")})
-
-    return inferred
-
-
 def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
     match = compute_skill_match(jd_data, resume_data)
 
@@ -418,14 +208,17 @@ def score_resume_against_jd(resume_data: dict, jd_data: dict) -> dict:
     raw = _call_llm(prompt, role="scoring")
     llm_result = _parse_json_response(raw)
 
-   # llama3.2 occasionally nests the whole result under a "score" key
+    # some models occasionally nest the whole result under a "score" key
     if "score" in llm_result and isinstance(llm_result["score"], dict):
         llm_result = llm_result["score"]
 
     inferred = llm_result.get("inferred_skills", [])
     inferred_set = {_normalize(s) for s in inferred}
 
-    final_matched = match["matched_skills"] + [f"{s} (inferred)" for s in inferred if _normalize(s) in {_normalize(m) for m in match["missing_skills"]}]
+    final_matched = match["matched_skills"] + [
+        f"{s} (inferred)" for s in inferred
+        if _normalize(s) in {_normalize(m) for m in match["missing_skills"]}
+    ]
     final_missing = [s for s in match["missing_skills"] if _normalize(s) not in inferred_set]
 
     return {

@@ -1,22 +1,23 @@
 # Smart Resume Screener
 
-An AI-powered recruitment tool that extracts structured data from resumes and job descriptions, then computes a match score with a human-readable justification — shortlisting the best candidates automatically. Built with a **local LLM** (via Ollama), so it runs entirely offline with zero API cost.
+An AI-powered recruitment tool that extracts structured data from resumes and job descriptions, computes a deterministic skill match, then uses an LLM to produce a 0–100 match score with a human-readable justification — shortlisting the best candidates automatically.
 
 ## How it works
 
 1. **Ingest** — Upload a job description (paste text or upload PDF/DOCX/TXT) and one or more candidate resumes (PDF/DOCX/TXT).
-2. **Extract** — Each document's raw text is passed to a local LLM (Ollama, `llama3.2`) which returns structured JSON: skills, experience, education, job titles for resumes; required/preferred skills, minimum experience, and education requirements for job descriptions.
-3. **Match** — Candidate skills are compared against job requirements using deterministic, whole-word token matching in Python (not the LLM) — see [Design Decisions](#design-decisions) for why.
-4. **Score** — The LLM takes the confirmed matched/missing skills plus experience and education context, and produces a 0–100 match score with a written justification, grounded in those facts.
-5. **Shortlist** — Candidates above a configurable score threshold are flagged and the full list is displayed ranked by score.
+2. **Extract** — Raw text is parsed in Python using regex and keyword matching against a curated skill taxonomy. No LLM involved — same approach used by real-world ATS systems (Workday, Greenhouse).
+3. **Match** — Candidate skills are compared against JD requirements using deterministic whole-word token matching in Python — `"Core Java"` matches `"Java"` but `"Java"` never false-matches `"JavaScript"`.
+4. **Score** — Groq (`llama-3.1-8b-instant`) receives the confirmed matched/missing skills, experience status, and education context, and produces a 0–100 score with a written justification grounded in those facts. It also infers implied skills (e.g. OOP from Java experience) in the same call.
+5. **Shortlist** — Candidates above a configurable score threshold are flagged; the full list is displayed ranked by score.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Backend | FastAPI, SQLite |
-| Resume/JD Parsing | pdfplumber (PDF), python-docx (DOCX) |
-| LLM | Ollama (local, `llama3.2`) — no API key, no cost |
+| Resume/JD Parsing | Python (regex + keyword taxonomy) |
+| File Parsing | pdfplumber (PDF), python-docx (DOCX) |
+| LLM | Groq API (`llama-3.1-8b-instant`) — scoring + inference only |
 | Frontend | React + Vite, axios |
 
 ## Architecture
@@ -27,61 +28,74 @@ An AI-powered recruitment tool that extracts structured data from resumes and jo
 │  (Vite)     │ ◀───────────────────────── │   backend    │
 └─────────────┘     scores + justification └──────┬───────┘
                                                     │
-                        ┌───────────────────────────┼───────────────────────┐
-                        ▼                            ▼                       ▼
-                 pdfplumber/                  Ollama (local LLM)          SQLite
-                 python-docx                  - extract structured        (jobs,
-                 text extraction              data from raw text          resumes,
-                                               - score + justify           scores)
-                                               (given pre-computed
-                                               matched/missing skills)
-                                                    ▲
+                   ┌────────────────────────────────┼──────────────────────┐
+                   ▼                                ▼                      ▼
+            pdfplumber /                  Python extraction            SQLite
+            python-docx                  (regex + skill taxonomy)     (jobs,
+            text extraction              - skills, experience,        resumes,
+                                         education, job titles        scores)
                                                     │
-                                          Python skill matcher
-                                          (deterministic, whole-word
-                                          token comparison — computes
-                                          matched_skills/missing_skills,
-                                          NOT the LLM)
+                                                    ▼
+                                         Python skill matcher
+                                         (deterministic, whole-word
+                                         token comparison)
+                                                    │
+                                                    ▼
+                                         Groq LLM (1 call/resume)
+                                         - infer implied skills
+                                         - produce score + justification
 ```
 
 ## Design Decisions
 
-**Why is skill matching done in Python, not the LLM, if this is an "LLM match scorer"?**
-The LLM still computes the match score — that's the core requirement, and it's fully LLM-driven, reasoning over experience, education, and skill coverage to produce the 0–100 score and justification. What's *not* LLM-driven is the supporting fact: "does the candidate have skill X or not." Small local models (`llama3.2` is 3B parameters) are unreliable at exact set comparison — in testing, it occasionally claimed a candidate was "missing" a skill that was clearly present in their profile. Rather than let the score be built on a hallucinated foundation, matched/missing skills are computed deterministically in Python (whole-word token overlap, so "Core Java" matches "Java" but "Java" doesn't false-match "JavaScript"), and the LLM is given those confirmed facts to reason over for the score and justification. This is the same division of labor a real recruiter uses: check the requirements list mechanically, then apply judgment on top.
+**Why is extraction done in Python, not the LLM?**
+The previous LLM-based extraction (Ollama, `gemma2:2b`) took 1–2 minutes per document on CPU and was unreliable — it dropped explicitly-listed skills, fabricated experience durations, and failed to follow instructions like "don't count extracurricular roles as experience." Moving extraction to Python (regex + a curated skill taxonomy) made it near-instant and fully reproducible. This is exactly how real-world ATS systems work: deterministic parsing for extraction, semantic judgment only where it's actually needed.
 
-**Known limitation:** matching is literal — it checks whether a skill is explicitly listed in the resume's extracted skills array, not whether it's reasonably implied (e.g. a resume that lists "Java" but not "OOP" won't get credit for OOP, even though OOP is implicit to Java experience). This trades recall for precision and explainability.
+**Why is skill matching done in Python, not the LLM?**
+Small models are unreliable at exact set comparison — in testing, models occasionally claimed a candidate was "missing" a skill clearly present in their profile. Matched/missing skills are computed deterministically in Python and passed to the LLM as confirmed facts, so the score is never built on a hallucinated foundation.
+
+**Why Groq instead of a local model?**
+Local models (Ollama, `gemma2:2b`) were the original approach — no API cost, fully offline. But for a scoring task that only needs one short structured output per resume, Groq's free tier (`llama-3.1-8b-instant`, ~500 tok/s) is dramatically faster with no hardware dependency, no timeout issues, and 14,400 requests/day on the free plan — more than enough for demo and assessment use.
+
+**Why one LLM call per resume instead of two?**
+The scoring prompt already asks the model for `inferred_skills` alongside the score and justification. A separate inference call (previous approach) was redundant — same context, same model, same output, just split across two round trips. Merging them halves Groq API usage and shaves latency.
+
+**Known limitation:** Python extraction matches skills that are explicitly listed in the document against the built-in taxonomy. Unusually-phrased resumes or JDs that don't use standard terminology may extract fewer skills than an LLM would. Both test JDs used clear markers (`Must have:`, `Nice to have:`), which the extractor handles well.
 
 ## Setup
 
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- [Ollama](https://ollama.com) installed locally
+- A free Groq API key — get one at [console.groq.com/keys](https://console.groq.com/keys)
 
-### 1. Install and start Ollama
-```bash
-ollama pull llama3.2
-ollama serve
-```
-
-### 2. Backend
+### 1. Backend
 ```bash
 cd backend
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
+# Add your GROQ_API_KEY to .env
 uvicorn app.main:app --reload --port 8000
 ```
 API docs available at `http://localhost:8000/docs`.
 
-### 3. Frontend
+### 2. Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 App available at `http://localhost:5173`.
+
+### `.env` reference
+```env
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...your_key_here...
+SHORTLIST_THRESHOLD=70
+DATABASE_PATH=./resume_screener.db
+```
 
 ## API Overview
 
@@ -98,18 +112,20 @@ App available at `http://localhost:5173`.
 smart-resume-screener/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI app entrypoint
-│   │   ├── config.py            # env-based configuration
-│   │   ├── models.py            # Pydantic schemas
-│   │   ├── database.py          # SQLite persistence layer
+│   │   ├── main.py                  # FastAPI app entrypoint
+│   │   ├── config.py                # env-based configuration
+│   │   ├── models.py                # Pydantic schemas
+│   │   ├── database.py              # SQLite persistence layer
 │   │   ├── services/
-│   │   │   ├── file_parser.py   # PDF/DOCX/TXT text extraction
-│   │   │   └── llm_service.py   # Ollama prompts + deterministic skill matching
+│   │   │   ├── file_parser.py       # PDF/DOCX/TXT text extraction
+│   │   │   ├── extraction.py        # Python resume/JD field extraction
+│   │   │   └── llm_service.py       # Groq scoring + deterministic skill matching
 │   │   └── routers/
 │   │       ├── jobs.py
 │   │       ├── resumes.py
 │   │       └── screening.py
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── .env.example
 └── frontend/
     └── src/
         ├── App.jsx
@@ -121,7 +137,8 @@ smart-resume-screener/
 ```
 
 ## Possible Extensions
-- Swap Ollama for a hosted API (OpenAI/Anthropic) via a single flag in `llm_service.py`
-- Add authentication for multi-recruiter use
+- Swap `llama-3.1-8b-instant` for `llama-3.3-70b-versatile` via `GROQ_MODEL` env var for stronger scoring reasoning
+- Add embedding-based semantic skill matching to catch implied skills beyond what the LLM inference step covers
 - Add CSV/PDF export of screening results
-- Add embedding-based semantic skill matching (to catch implied skills like OOP-from-Java) as a middle ground between literal matching and full LLM inference
+- Add authentication for multi-recruiter use
+- Fallback to Ollama when Groq is rate-limited (`LLM_PROVIDER=ollama` in `.env`)
