@@ -51,6 +51,7 @@ class ResumeUploadResponse(BaseModel):
 class ScreeningResponse(BaseModel):
     job_id: int
     results: List[ScoreResult]
+    shortlist_threshold: float
 
 class Job(BaseModel):
     id: int

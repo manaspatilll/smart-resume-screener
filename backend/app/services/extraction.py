@@ -61,6 +61,19 @@ SECTION_HEADER_RE = re.compile(r'^[A-Z][A-Z\s\-&/]{2,40}$')
 REQUIRED_MARKERS = ["must have", "required", "mandatory", "essential"]
 PREFERRED_MARKERS = ["nice to have", "preferred", "good to have", "desirable", "plus", "bonus", "optional"]
 
+PREFERRED_SECTION_KEYWORDS = ["PREFERRED", "NICE TO HAVE", "GOOD TO HAVE", "DESIRABLE", "BONUS", "OPTIONAL"]
+REQUIRED_SECTION_KEYWORDS = ["REQUIRED", "REQUIREMENTS", "MUST HAVE", "MANDATORY", "QUALIFICATIONS", "MINIMUM"]
+
+
+def _section_default_bucket(header: str) -> str:
+    """Classify a JD section header as 'preferred' or 'required' so bare
+    bullets under e.g. a 'Preferred Qualifications' header aren't
+    miscategorized just because they lack an inline marker."""
+    header_norm = header.upper()
+    if any(kw in header_norm for kw in PREFERRED_SECTION_KEYWORDS):
+        return "preferred"
+    return "required"
+
 
 def _find_skills_in_text(text: str) -> list:
     """Whole-word/phrase match against the skill taxonomy — same lookaround
@@ -126,6 +139,34 @@ def _compute_experience_years(experience_entries: list) -> float:
     return round(total_months / 12, 2)
 
 
+NAME_EXCLUDE_KEYWORDS = [
+    "resume", "curriculum vitae", "cv", "objective", "summary",
+    "profile", "contact", "phone", "email", "address", "linkedin",
+    "github", "portfolio",
+]
+
+
+def _looks_like_name(line: str) -> bool:
+    """A name line is short, has no digits/emails/urls, isn't a section
+    header (SECTION_HEADER_RE), isn't a known non-name label, and has a
+    plausible word count for a person's name (1-4 words)."""
+    if not line or len(line) >= 50:
+        return False
+    if any(c.isdigit() for c in line) or '@' in line:
+        return False
+    if SECTION_HEADER_RE.match(line):
+        return False
+    line_lower = line.lower()
+    if any(kw in line_lower for kw in NAME_EXCLUDE_KEYWORDS):
+        return False
+    if 'http' in line_lower or 'www.' in line_lower:
+        return False
+    word_count = len(line.split())
+    if word_count < 1 or word_count > 4:
+        return False
+    return True
+
+
 def extract_resume_fields(text: str) -> dict:
     sections = _split_into_sections(text)
 
@@ -135,7 +176,7 @@ def extract_resume_fields(text: str) -> dict:
     name = None
     for line in text.split('\n'):
         stripped = line.strip()
-        if stripped and len(stripped) < 50 and not any(c.isdigit() for c in stripped) and '@' not in stripped:
+        if _looks_like_name(stripped):
             name = stripped
             break
 
@@ -200,22 +241,28 @@ def extract_resume_fields(text: str) -> dict:
 
 def extract_jd_fields(text: str) -> dict:
     lines = text.split('\n')
+    sections = _split_into_sections(text)
     required_skills = set()
     preferred_skills = set()
 
-    for line in lines:
-        line_lower = line.lower()
-        line_skills = _find_skills_in_text(line)
-        if not line_skills:
-            continue
-        if any(marker in line_lower for marker in PREFERRED_MARKERS):
-            preferred_skills.update(line_skills)
-        elif any(marker in line_lower for marker in REQUIRED_MARKERS):
-            required_skills.update(line_skills)
-        else:
-            # no explicit marker — default to required, since most bare JD
-            # bullets describe baseline expectations, not optional extras
-            required_skills.update(line_skills)
+    for header, content in sections.items():
+        section_bucket = _section_default_bucket(header)
+        for line in content.split('\n'):
+            line_lower = line.lower()
+            line_skills = _find_skills_in_text(line)
+            if not line_skills:
+                continue
+            if any(marker in line_lower for marker in PREFERRED_MARKERS):
+                preferred_skills.update(line_skills)
+            elif any(marker in line_lower for marker in REQUIRED_MARKERS):
+                required_skills.update(line_skills)
+            elif section_bucket == "preferred":
+                preferred_skills.update(line_skills)
+            else:
+                # no inline marker and not under a preferred-style header —
+                # default to required, since most bare JD bullets describe
+                # baseline expectations, not optional extras
+                required_skills.update(line_skills)
 
     preferred_skills -= required_skills
 

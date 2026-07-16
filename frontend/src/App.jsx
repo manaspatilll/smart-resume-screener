@@ -9,6 +9,7 @@ function ScreenerApp() {
   const [job, setJob] = useState(null)
   const [resumes, setResumes] = useState([])
   const [results, setResults] = useState([])
+  const [threshold, setThreshold] = useState(70)
   const [screening, setScreening] = useState(false)
   const [error, setError] = useState(null)
 
@@ -19,8 +20,9 @@ function ScreenerApp() {
     setResults([])
     try {
       const resumeIds = resumes.map((r) => r.resume_id)
-      const data = await runScreening(job.job_id, resumeIds)
+      const data = await runScreening(job.job_id, resumeIds, threshold)
       setResults(data.results)
+      setThreshold(data.shortlist_threshold)
     } catch (err) {
       setError(err?.response?.data?.detail || 'Screening failed.')
     } finally {
@@ -57,6 +59,22 @@ function ScreenerApp() {
 
       {job && resumes.length > 0 && (
         <div className="card">
+          <div style={{ marginBottom: 16 }}>
+            <label htmlFor="threshold-slider" style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>
+              Shortlist threshold: {threshold}
+            </label>
+            <input
+              id="threshold-slider"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={threshold}
+              disabled={screening}
+              onChange={(e) => setThreshold(Number(e.target.value))}
+              style={{ width: '100%' }}
+            />
+          </div>
           <button onClick={handleRunScreening} disabled={screening} className="primary">
             {screening && <span className="spinner" />}
             {screening ? 'Scoring candidates…' : `Run Screening on ${resumes.length} Resume${resumes.length > 1 ? 's' : ''}`}
@@ -65,7 +83,13 @@ function ScreenerApp() {
         </div>
       )}
 
-      <ResultsTable results={results} screening={screening} ready={Boolean(job && resumes.length > 0)} />
+      <ResultsTable
+        results={results}
+        screening={screening}
+        ready={Boolean(job && resumes.length > 0)}
+        threshold={threshold}
+        jobId={job?.job_id}
+      />
     </div>
   )
 }

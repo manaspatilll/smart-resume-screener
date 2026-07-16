@@ -1,12 +1,21 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database import init_db, reset_db
+from app.database import init_db
 from app.routers import jobs, resumes, screening
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="Smart Resume Screener API",
     description="Extracts structured data from resumes/JDs and computes LLM-based match scores.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -15,17 +24,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(jobs.router)
 app.include_router(resumes.router)
 app.include_router(screening.router)
-
-
-@app.on_event("startup")
-def on_startup():
-    reset_db()
-    init_db()
 
 
 @app.get("/")

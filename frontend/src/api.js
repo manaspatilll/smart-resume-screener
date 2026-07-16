@@ -27,12 +27,33 @@ export async function uploadResumesBatch(files) {
   return res.data
 }
 
-export async function runScreening(jobId, resumeIds = null) {
+export async function runScreening(jobId, resumeIds = null, shortlistThreshold = null) {
   const res = await api.post('/screening/run', {
     job_id: jobId,
     resume_ids: resumeIds,
+    shortlist_threshold: shortlistThreshold,
   })
   return res.data
+}
+
+export async function exportResults(jobId, format = 'csv') {
+  const res = await api.get(`/screening/export/${jobId}`, {
+    params: { format },
+    responseType: 'blob',
+  })
+
+  const disposition = res.headers['content-disposition'] || ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match ? match[1] : `results.${format}`
+
+  const url = window.URL.createObjectURL(res.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
 }
 
 export default api
